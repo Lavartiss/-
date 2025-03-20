@@ -1,0 +1,319 @@
+import tkinter as tk
+import random
+import copy
+from tkinter import ttk
+
+# Параметры симуляции
+GRID_SIZE = 20
+CELL_SIZE = 30
+MAX_STEPS = 150
+NUM_FOOD = 40
+NUM_OBSTACLES = 15
+NUM_STATES = 4
+GENOTYPE_LENGTH = NUM_STATES * 3
+
+# Параметры генетического алгоритма
+POP_SIZE = 30
+GENERATIONS = 20
+CROSSOVER_RATE = 0.85
+MUTATION_RATE = 0.15
+ELITE_RATE = 0.1
+AGENT_SPEED = 50
+
+def generate_resources(grid_size, num_food, num_obstacles):
+    resources = {'food': set(), 'obstacles': set()}
+    
+    while len(resources['food']) < num_food:
+        pos = (random.randint(0, grid_size-1), random.randint(0, grid_size-1))
+        resources['food'].add(pos)
+    
+    while len(resources['obstacles']) < num_obstacles:
+        pos = (random.randint(0, grid_size-1), random.randint(0, grid_size-1))
+        if pos not in resources['food']:
+            resources['obstacles'].add(pos)
+    
+    return resources
+
+class ResourceCollector:
+    def __init__(self, genotype, environment, canvas, score_label):
+        self.genotype = genotype
+        self.environment = copy.deepcopy(environment)
+        self.canvas = canvas
+        self.score_label = score_label
+        self.reset()
+        self.draw_environment()
+
+    def reset(self):
+        self.x = GRID_SIZE // 2
+        self.y = GRID_SIZE // 2
+        self.dir = 0  # 0:up, 1:right, 2:down, 3:left
+        self.state = 0
+        self.steps = 0
+        self.score = 0
+        self.history = set()
+        self.update_display()
+
+    def draw_environment(self):
+        self.canvas.delete('food')
+        self.canvas.delete('obstacle')
+        
+        # Draw food
+        for x, y in self.environment['food']:
+            self.canvas.create_oval(
+                x*CELL_SIZE+5, y*CELL_SIZE+5,
+                (x+1)*CELL_SIZE-5, (y+1)*CELL_SIZE-5,
+                fill='#4CAF50', outline='#2E7D32', width=2, tags='food'
+            )
+        
+        # Draw obstacles
+        for x, y in self.environment['obstacles']:
+            self.canvas.create_rectangle(
+                x*CELL_SIZE+3, y*CELL_SIZE+3,
+                (x+1)*CELL_SIZE-3, (y+1)*CELL_SIZE-3,
+                fill='#F44336', outline='#B71C1C', width=2, tags='obstacle'
+            )
+
+    def get_front_cell(self):
+        directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+        dx, dy = directions[self.dir]
+        return (self.x + dx) % GRID_SIZE, (self.y + dy) % GRID_SIZE
+
+    def update_display(self):
+        self.canvas.delete('agent')
+        # Calculate agent position
+        x0 = self.x * CELL_SIZE + 4
+        y0 = self.y * CELL_SIZE + 4
+        x1 = (self.x + 1) * CELL_SIZE - 4
+        y1 = (self.y + 1) * CELL_SIZE - 4
+        
+        # Draw agent with direction indicator
+        self.canvas.create_oval(x0, y0, x1, y1, fill='#2196F3', outline='#FFC107', width=2, tags='agent')
+        
+        # Draw direction triangle
+        triangle_size = CELL_SIZE // 4
+        if self.dir == 0:  # Up
+            points = [x0 + CELL_SIZE//2, y0 + triangle_size,
+                      x0 + triangle_size, y1 - triangle_size,
+                      x1 - triangle_size, y1 - triangle_size]
+        elif self.dir == 1:  # Right
+            points = [x0 + triangle_size, y0 + triangle_size,
+                      x0 + triangle_size, y1 - triangle_size,
+                      x1 - triangle_size, y0 + CELL_SIZE//2]
+        elif self.dir == 2:  # Down
+            points = [x0 + triangle_size, y0 + triangle_size,
+                      x1 - triangle_size, y0 + triangle_size,
+                      x0 + CELL_SIZE//2, y1 - triangle_size]
+        else:  # Left
+            points = [x1 - triangle_size, y0 + triangle_size,
+                      x0 + triangle_size, y0 + CELL_SIZE//2,
+                      x1 - triangle_size, y1 - triangle_size]
+        
+        self.canvas.create_polygon(points, fill='#FFC107', outline='#FF9800', tags='agent')
+        self.score_label.config(text=f"Score: {self.score:.1f}")
+        self.canvas.update_idletasks()
+
+    def perceive_environment(self):
+        front = self.get_front_cell()
+        if front in self.environment['food']: return 1
+        if front in self.environment['obstacles']: return 2
+        return 0
+
+    def execute_action(self, action):
+        # Update state machine
+        perception = self.perceive_environment()
+        idx = self.state * 3 + perception
+        action, new_state = self.genotype[idx]
+        self.state = new_state
+
+        # Execute action
+        if action == 0:  # Move forward
+            new_x, new_y = self.get_front_cell()
+            
+            # Check obstacle collision
+            if (new_x, new_y) not in self.environment['obstacles']:
+                self.x, self.y = new_x, new_y
+                
+                # Collect food
+                if (self.x, self.y) in self.environment['food']:
+                    self.environment['food'].remove((self.x, self.y))
+                    self.score += 1
+                    self.draw_environment()
+                
+                # Penalize revisits
+                if (self.x, self.y) in self.history:
+                    self.score = max(0, self.score - 0.2)
+                self.history.add((self.x, self.y))
+                
+        elif action == 1:  # Turn left
+            self.dir = (self.dir - 1) % 4
+        elif action == 2:  # Turn right
+            self.dir = (self.dir + 1) % 4
+            
+        self.steps += 1
+        self.update_display()
+
+class EvolutionaryOptimizer:
+    def __init__(self, environment):
+        self.environment = environment
+        self.population = [self.create_individual() for _ in range(POP_SIZE)]
+        self.best_solution = (None, -float('inf'))
+
+    def create_individual(self):
+        return [(random.randint(0,3), random.randint(0,NUM_STATES-1)) 
+               for _ in range(GENOTYPE_LENGTH)]
+
+    def evaluate_fitness(self, individual):
+        canvas = tk.Canvas()  # Dummy canvas for background evaluation
+        score_label = tk.Label()
+        agent = ResourceCollector(individual, self.environment, canvas, score_label)
+        for _ in range(MAX_STEPS):
+            agent.execute_action(agent.genotype[agent.state * 3 + agent.perceive_environment()])
+        return agent.score
+
+    def evolve_generation(self):
+        # Evaluate population
+        graded = [(ind, self.evaluate_fitness(ind)) for ind in self.population]
+        graded.sort(key=lambda x: x[1], reverse=True)
+        
+        # Update best solution
+        current_best = graded[0]
+        if current_best[1] > self.best_solution[1]:
+            self.best_solution = current_best
+        
+        # Selection and reproduction
+        elite_size = max(1, int(POP_SIZE * ELITE_RATE))
+        new_pop = [ind for ind, _ in graded[:elite_size]]
+        
+        while len(new_pop) < POP_SIZE:
+            parent1 = self.tournament_selection(graded)
+            parent2 = self.tournament_selection(graded)
+            
+            if random.random() < CROSSOVER_RATE:
+                child = self.crossover(parent1, parent2)
+            else:
+                child = parent1.copy()
+            
+            new_pop.append(self.mutate(child))
+        
+        self.population = new_pop[:POP_SIZE]
+
+    def tournament_selection(self, graded, k=5):
+        return random.sample(graded, k)[0][0]
+
+    def crossover(self, parent1, parent2):
+        pt = random.randint(1, GENOTYPE_LENGTH-1)
+        return parent1[:pt] + parent2[pt:]
+
+    def mutate(self, individual):
+        return [(random.randint(0,3), s) if random.random() < MUTATION_RATE else (a, s) 
+                for (a, s) in individual]
+
+class SimulationApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Evolution Resource Collector")
+        self.geometry(f"{GRID_SIZE*CELL_SIZE+300}x{GRID_SIZE*CELL_SIZE+150}")
+        
+        # Initialize environment
+        self.environment = generate_resources(GRID_SIZE, NUM_FOOD, NUM_OBSTACLES)
+        self.optimizer = EvolutionaryOptimizer(self.environment)
+        
+        # Create GUI
+        self.canvas = tk.Canvas(self, width=GRID_SIZE*CELL_SIZE, 
+                              height=GRID_SIZE*CELL_SIZE, bg='white')
+        self.canvas.pack(side='left', padx=20, pady=20)
+        
+        control_frame = tk.Frame(self)
+        control_frame.pack(side='right', fill='both', expand=True, padx=10, pady=20)
+        
+        # Information panel
+        self.score_label = tk.Label(control_frame, text="Score: 0.0", 
+                                   font=('Arial', 14), fg='#1A237E')
+        self.score_label.pack(pady=10)
+        
+        self.progress = ttk.Progressbar(control_frame, orient='horizontal',
+                                       length=200, mode='determinate')
+        self.progress.pack(pady=5)
+        
+        self.gen_label = tk.Label(control_frame, text="Generation: 0/20",
+                                 font=('Arial', 10), fg='#616161')
+        self.gen_label.pack(pady=5)
+        
+        # Control buttons
+        self.start_btn = tk.Button(control_frame, text="Start Evolution", 
+                                  command=self.start_evolution,
+                                  bg='#4CAF50', fg='white', font=('Arial', 12))
+        self.start_btn.pack(pady=10, fill='x', ipady=5)
+        
+        self.reset_btn = tk.Button(control_frame, text="New Environment",
+                                  command=self.reset_environment,
+                                  bg='#607D8B', fg='white', font=('Arial', 12))
+        self.reset_btn.pack(pady=5, fill='x', ipady=5)
+        
+        self.draw_environment()
+
+    def draw_environment(self):
+        self.canvas.delete('all')
+        # Draw grid
+        for i in range(GRID_SIZE):
+            self.canvas.create_line(0, i*CELL_SIZE, GRID_SIZE*CELL_SIZE, i*CELL_SIZE, fill='#F5F5F5')
+            self.canvas.create_line(i*CELL_SIZE, 0, i*CELL_SIZE, GRID_SIZE*CELL_SIZE, fill='#F5F5F5')
+        
+        # Draw resources
+        for x, y in self.environment['food']:
+            self.canvas.create_oval(
+                x*CELL_SIZE+5, y*CELL_SIZE+5,
+                (x+1)*CELL_SIZE-5, (y+1)*CELL_SIZE-5,
+                fill='#4CAF50', outline='#2E7D32', width=2, tags='food'
+            )
+        
+        # Draw obstacles
+        for x, y in self.environment['obstacles']:
+            self.canvas.create_rectangle(
+                x*CELL_SIZE+3, y*CELL_SIZE+3,
+                (x+1)*CELL_SIZE-3, (y+1)*CELL_SIZE-3,
+                fill='#F44336', outline='#B71C1C', width=2, tags='obstacle'
+            )
+
+    def reset_environment(self):
+        self.environment = generate_resources(GRID_SIZE, NUM_FOOD, NUM_OBSTACLES)
+        self.optimizer = EvolutionaryOptimizer(self.environment)
+        self.draw_environment()
+        self.score_label.config(text="Score: 0.0")
+        self.canvas.update()
+
+    def start_evolution(self):
+        self.start_btn.config(state='disabled')
+        self.reset_btn.config(state='disabled')
+        self.progress['value'] = 0
+        self.progress['maximum'] = GENERATIONS
+        
+        for gen in range(GENERATIONS):
+            self.optimizer.evolve_generation()
+            self.progress['value'] = gen + 1
+            self.gen_label.config(text=f"Generation: {gen+1}/{GENERATIONS}")
+            self.update()
+        
+        self.start_btn.config(state='normal')
+        self.reset_btn.config(state='normal')
+        self.simulate_best_agent()
+
+    def simulate_best_agent(self):
+        best_genotype = self.optimizer.best_solution[0]
+        agent = ResourceCollector(
+            best_genotype,
+            self.environment,
+            self.canvas,
+            self.score_label
+        )
+        
+        def simulation_step(step=0):
+            if step < MAX_STEPS:
+                agent.execute_action(agent.genotype[agent.state * 3 + agent.perceive_environment()])
+                self.after(AGENT_SPEED, simulation_step, step + 1)
+        
+        simulation_step()
+
+if __name__ == "__main__":
+    app = SimulationApp()
+    app.mainloop()
