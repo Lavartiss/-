@@ -1,0 +1,266 @@
+import tkinter as tk
+import random
+import copy
+from tkinter import ttk
+
+# Параметры симуляции
+GRID_SIZE = 32
+CELL_SIZE = 20
+MAX_STEPS = 200
+NUM_FOOD = 50
+NUM_OBSTACLES = 20
+NUM_STATES = 4
+GENOTYPE_LENGTH = NUM_STATES * 3
+
+# Параметры генетического алгоритма
+POP_SIZE = 50
+GENERATIONS = 30
+CROSSOVER_RATE = 0.8
+MUTATION_RATE = 0.1
+AGENT_SPEED = 50
+
+# Генерация случайного поля
+def generate_resources(grid_size, num_food, num_obstacles):
+    food_positions = set()
+    obstacle_positions = set()
+
+    while len(food_positions) < num_food:
+        pos = (random.randint(0, grid_size - 1), random.randint(0, grid_size - 1))  
+        food_positions.add(pos)
+
+    while len(obstacle_positions) < num_obstacles:
+        pos = (random.randint(0, grid_size - 1), random.randint(0, grid_size - 1))
+        if pos not in food_positions:
+            obstacle_positions.add(pos)
+
+    return food_positions, obstacle_positions
+
+class ResourceCollector:
+    def __init__(self, genotype, food_map, obstacle_map, canvas, score_label=None):
+        self.genotype = genotype
+        self.food_map = copy.deepcopy(food_map)
+        self.obstacle_map = copy.deepcopy(obstacle_map)
+        self.canvas = canvas
+        self.score_label = score_label
+        self.visited_positions = set()
+        self.reset()
+
+    def reset(self):
+        self.x = GRID_SIZE // 2
+        self.y = GRID_SIZE // 2
+        self.orientation = 0
+        self.state = 0
+        self.steps = 0
+        self.food_collected = 0
+        self.visited_positions.clear()
+        self.draw_resources()
+        self.draw_agent()
+        self.update_score()
+
+    def update_score(self):
+        if self.score_label:
+            self.score_label.config(text=f"Собрано ресурсов: {self.food_collected}")
+
+    def front_cell(self):
+        directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+        dx, dy = directions[self.orientation]
+        return (self.x + dx) % GRID_SIZE, (self.y + dy) % GRID_SIZE
+
+    def draw_agent(self):
+        self.canvas.delete("agent")
+        x1 = self.x * CELL_SIZE + 2
+        y1 = self.y * CELL_SIZE + 2
+        x2 = x1 + CELL_SIZE - 4
+        y2 = y1 + CELL_SIZE - 4
+        self.canvas.create_oval(x1, y1, x2, y2, fill="blue", outline="yellow", width=2, tags="agent")
+
+    def draw_resources(self):
+        self.canvas.delete("food")
+        self.canvas.delete("obstacle")
+        
+        for x, y in self.food_map:
+            self.canvas.create_rectangle(
+                x*CELL_SIZE, y*CELL_SIZE,
+                (x+1)*CELL_SIZE, (y+1)*CELL_SIZE,
+                fill="green", tags="food"
+            )
+            
+        for x, y in self.obstacle_map:
+            self.canvas.create_rectangle(
+                x*CELL_SIZE, y*CELL_SIZE,
+                (x+1)*CELL_SIZE, (y+1)*CELL_SIZE,
+                fill="red", tags="obstacle"
+            )
+
+    def step(self):
+        current_pos = (self.x, self.y)
+        if current_pos in self.visited_positions:
+            self.food_collected = max(0, self.food_collected - 0.1)
+        self.visited_positions.add(current_pos)
+
+        front = self.front_cell()
+        perception = 0
+        if front in self.food_map: perception = 1
+        elif front in self.obstacle_map: perception = 2
+
+        index = self.state * 3 + perception
+        action, next_state = self.genotype[index]
+        self.state = next_state
+
+        if action == 0:  # Движение вперед
+            new_x, new_y = front
+            if 0 <= new_x < GRID_SIZE and 0 <= new_y < GRID_SIZE:
+                self.x, self.y = new_x, new_y
+                if (self.x, self.y) in self.food_map:
+                    self.food_map.remove((self.x, self.y))
+                    self.food_collected += 1
+                    self.update_score()
+        elif action == 1:  # Поворот налево
+            self.orientation = (self.orientation - 1) % 4
+        elif action == 2:  # Поворот направо
+            self.orientation = (self.orientation + 1) % 4
+
+        self.steps += 1
+        self.draw_agent()
+        self.canvas.update_idletasks()
+
+    def run(self, max_steps=MAX_STEPS):
+        self.reset()
+        for _ in range(max_steps):
+            self.step()
+        return self.food_collected
+
+class Individual:
+    def __init__(self, genotype=None):
+        if genotype is None:
+            self.genotype = [
+                (random.randint(0, 3), random.randint(0, NUM_STATES-1)) 
+                for _ in range(GENOTYPE_LENGTH)
+            ]
+        else:
+            self.genotype = genotype
+        self.fitness = 0
+
+    def evaluate(self, food_map, obstacle_map, canvas, score_label=None):
+        sim = ResourceCollector(self.genotype, food_map, obstacle_map, canvas, score_label)
+        self.fitness = sim.run()
+        return self.fitness
+
+    def copy(self):
+        return Individual(copy.deepcopy(self.genotype))
+
+def crossover(parent1, parent2):
+    if random.random() < CROSSOVER_RATE:
+        point = random.randint(1, GENOTYPE_LENGTH-1)
+        return (
+            Individual(parent1.genotype[:point] + parent2.genotype[point:]),
+            Individual(parent2.genotype[:point] + parent1.genotype[point:])
+        )
+    return parent1.copy(), parent2.copy()
+
+def mutate(individual):
+    for i in range(len(individual.genotype)):
+        if random.random() < MUTATION_RATE:
+            if random.random() < 0.5:
+                individual.genotype[i] = (random.randint(0, 3), individual.genotype[i][1])
+            else:
+                individual.genotype[i] = (individual.genotype[i][0], random.randint(0, NUM_STATES-1))
+
+def tournament_selection(population, k=3):
+    return max(random.sample(population, k), key=lambda x: x.fitness)
+
+class SimulationApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Сбор ресурсов")
+        self.geometry(f"{GRID_SIZE*CELL_SIZE+200}x{GRID_SIZE*CELL_SIZE+100}")
+        
+        self.canvas = tk.Canvas(self, width=GRID_SIZE*CELL_SIZE, height=GRID_SIZE*CELL_SIZE, bg="white")
+        self.canvas.pack(side="left", padx=10, pady=10)
+        
+        control_frame = tk.Frame(self)
+        control_frame.pack(side="right", fill="y", padx=10)
+        
+        self.score_label = tk.Label(control_frame, text="Собрано: 0", font=("Arial", 12))
+        self.score_label.pack(pady=10)
+        
+        self.progress = ttk.Progressbar(control_frame, orient="horizontal", length=150, mode="determinate")
+        self.progress.pack(pady=5)
+        
+        self.start_btn = tk.Button(control_frame, text="Начать обучение", command=self.start_training)
+        self.start_btn.pack(pady=5)
+        
+        self.food_map, self.obstacle_map = generate_resources(GRID_SIZE, NUM_FOOD, NUM_OBSTACLES)
+        self.draw_environment()
+
+    def draw_environment(self):
+        self.canvas.delete("all")
+        for x in range(GRID_SIZE):
+            self.canvas.create_line(x*CELL_SIZE, 0, x*CELL_SIZE, GRID_SIZE*CELL_SIZE, fill="#EEE")
+        for y in range(GRID_SIZE):
+            self.canvas.create_line(0, y*CELL_SIZE, GRID_SIZE*CELL_SIZE, y*CELL_SIZE, fill="#EEE")
+            
+        for x, y in self.food_map:
+            self.canvas.create_oval(
+                x*CELL_SIZE+4, y*CELL_SIZE+4,
+                (x+1)*CELL_SIZE-4, (y+1)*CELL_SIZE-4,
+                fill="green", tags="food"
+            )
+            
+        for x, y in self.obstacle_map:
+            self.canvas.create_rectangle(
+                x*CELL_SIZE+2, y*CELL_SIZE+2,
+                (x+1)*CELL_SIZE-2, (y+1)*CELL_SIZE-2,
+                fill="red", tags="obstacle"
+            )
+
+    def start_training(self):
+        self.start_btn.config(state="disabled")
+        self.progress["value"] = 0
+        self.progress["maximum"] = GENERATIONS
+        
+        population = [Individual() for _ in range(POP_SIZE)]
+        best_agent = None
+        
+        for gen in range(GENERATIONS):
+            # Оценка популяции
+            for ind in population:
+                ind.evaluate(self.food_map, self.obstacle_map, self.canvas, self.score_label)
+            
+            # Отбор и размножение
+            new_population = []
+            while len(new_population) < POP_SIZE:
+                parent1 = tournament_selection(population)
+                parent2 = tournament_selection(population)
+                child1, child2 = crossover(parent1, parent2)
+                mutate(child1)
+                mutate(child2)
+                new_population.extend([child1, child2])
+            
+            population = new_population[:POP_SIZE]
+            best_agent = max(population, key=lambda x: x.fitness)
+            self.progress["value"] = gen + 1
+            self.update()
+        
+        self.start_btn.config(state="normal")
+        self.show_best_agent(best_agent)
+
+    def show_best_agent(self, best_agent):
+        collector = ResourceCollector(
+            best_agent.genotype,
+            self.food_map,
+            self.obstacle_map,
+            self.canvas,
+            self.score_label
+        )
+        
+        def simulation_step():
+            if collector.steps < MAX_STEPS:
+                collector.step()
+                self.after(AGENT_SPEED, simulation_step)
+        
+        simulation_step()
+
+if __name__ == "__main__":
+    app = SimulationApp()
+    app.mainloop()
